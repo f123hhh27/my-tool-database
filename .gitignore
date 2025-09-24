@@ -1,0 +1,4 @@
+# data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
