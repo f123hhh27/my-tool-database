@@ -1,0 +1,2 @@
+﻿name,language,version,platform,purpose,link,tags,snippet_path,notes,created_at,updated_at
+colab_auto_disconnect,python,3.12.11,google_colab,自動存檔並斷開 Colab 連線,https://example.com,"colab, auto_disconnect",C:\Users\f123h\Desktop\chris\program\my-tool-database\snippets\colab_auto_disconnect.ipynb,,,
