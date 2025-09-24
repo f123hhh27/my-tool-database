@@ -33,6 +33,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 import re
+from zoneinfo import ZoneInfo
 
 # 專案根目錄 = 本檔所在目錄的上一層
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -54,8 +55,9 @@ def conn():
     return sqlite3.connect(DB_PATH)
 
 def _now_iso_utc():
-    # 例：2025-09-25T09:12:00Z
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    # 例：2025-09-25T09:12:00Z（UTC）
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
 
 # ---------- 清洗 / 正規化 ----------
 
@@ -178,6 +180,16 @@ def _normalize_iso_utc(s: str) -> str:
     # 失敗就清空，交由系統自動補
     return ""
 
+def _utc_to_taipei_str(utc_str: str) -> str:
+    """把 'YYYY-MM-DDTHH:MM:SSZ' 轉成台北時間的易讀字串。輸入為空就回空。"""
+    if not utc_str:
+        return ""
+    # 將 Z 轉為 +00:00，讓 fromisoformat 可解析
+    dt_utc = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+    dt_tpe = dt_utc.astimezone(ZoneInfo("Asia/Taipei"))
+    # 你想顯示成什麼樣都可以；這裡用常見格式
+    return dt_tpe.strftime("%Y-%m-%d %H:%M:%S %Z")  # 例如：2025-09-25 18:00:00 CST
+
 def normalize_row(row: dict) -> dict:
     """回傳一份**新的** row（不就地修改），套用清洗規則。"""
     out = dict(row)  # copy
@@ -261,6 +273,10 @@ def upsert_tool(row: dict):
     created = row.get("created_at") or _get_existing_created_at(row["name"]) or now
     updated = now
 
+    # 確保 updated 不早於 created（避免 CSV 給未來時間時出現倒退）
+    if updated < created:
+        updated = created
+
     with conn() as c:
         c.execute("""
         INSERT INTO tools (
@@ -294,7 +310,9 @@ def upsert_tool(row: dict):
             "created_at": created,
             "updated_at": updated
         })
-    print(f"Upserted: {row['name']} (created_at={created}, updated_at={updated})")
+    created_tpe = _utc_to_taipei_str(created)
+    updated_tpe = _utc_to_taipei_str(updated)
+    print(f"Upserted: {row['name']} (created_at={created_tpe}, updated_at={updated_tpe})")
 
 def list_tools():
     """列出所有工具"""
@@ -312,7 +330,10 @@ def list_tools():
             if link:         print(f"  link:    {link}")
             if snippet_path: print(f"  snippet: {snippet_path}")
             if notes:        print(f"  notes:   {notes}")
-            print(f"  created: {created_at} | updated: {updated_at}\n")
+            created_tpe = _utc_to_taipei_str(created_at)
+            updated_tpe = _utc_to_taipei_str(updated_at)
+            print(f"  created: {created_tpe} ({created_at}) | updated: {updated_tpe} ({updated_at})\n")
+
 
 def find_tools(q=None, tag=None, platform=None, language=None, version=None):
     """依條件查詢（q 會同時比對 name/purpose/link/notes）"""
@@ -348,7 +369,10 @@ def find_tools(q=None, tag=None, platform=None, language=None, version=None):
             if link:    print(f"  link:    {link}")
             if snip:    print(f"  snippet: {snip}")
             if notes:   print(f"  notes:   {notes}")
-            print(f"  created: {created} | updated: {updated}\n")
+            created_tpe = _utc_to_taipei_str(created)
+            updated_tpe = _utc_to_taipei_str(updated)
+            print(f"  created: {created_tpe} ({created}) | updated: {updated_tpe} ({updated})\n")
+
 
 # ---------- 匯入 / 匯出 CSV ----------
 
@@ -364,44 +388,36 @@ def export_csv(path: str):
     print("Exported to:", path)
 
 def import_csv(path: str):
-    """從 CSV 匯入（upsert by name）。
-    - 先做欄位/值清洗（normalize_row）
-    - 若缺 created_at：自動補現在（UTC, ISO8601）
-    - updated_at：每次匯入都刷新
-    """
     count = 0
-    with open(path, "r", encoding="utf-8") as f:
+    # 1) 用 utf-8-sig 自動去掉 BOM
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f)
 
         for row in reader:
-            # 1) 先把 CSV 的 key/value 做基本去空白
-            base = { (k.strip() if k else k): (v.strip() if isinstance(v, str) else v)
-                     for k, v in row.items() }
+            # 2) 鍵名去空白 + 去 BOM；值去空白
+            base = {
+                ((k.strip().lstrip("\ufeff")) if k else k): (v.strip() if isinstance(v, str) else v)
+                for k, v in row.items()
+            }
 
-            # 2) 必要欄位檢查
             if not base.get("name"):
                 print("Skipped a row without 'name'")
                 continue
 
-            # 3) 先確保全欄位存在（避免 normalize_row 取不到 key）
             for h in CSV_HEADERS:
                 base.setdefault(h, "")
 
-            # 4) 清洗：名稱、語言/平台別名、tags、路徑、連結、（若外部提供）時間格式
             normalized = normalize_row(base)
 
-            # 5) 時間欄位補齊：
-            #    - 若 normalize_row 未成功產生 created_at（或 CSV 沒提供），這裡補現在
-            #    - updated_at 一律刷新現在
             if not normalized.get("created_at"):
                 normalized["created_at"] = _now_iso_utc()
             normalized["updated_at"] = _now_iso_utc()
 
-            # 6) upsert
             upsert_tool(normalized)
             count += 1
 
     print(f"Imported {count} rows from {path}")
+
 
 # ---------- 產生 CSV 模板 ----------
 
